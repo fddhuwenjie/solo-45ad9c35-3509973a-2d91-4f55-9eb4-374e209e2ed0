@@ -1,0 +1,17 @@
+{
+  "name": "U-channel 260x100 t2 (feasible)",
+  "contour": [[0, 0], [100, 0], [100, 260], [0, 260]],
+  "bends": [
+    {"id": "B1", "p0": [0, 80], "p1": [100, 80],
+     "target_angle_deg": 90, "inside_radius": 2, "flange_side": -1},
+    {"id": "B2", "p0": [0, 180], "p1": [100, 180],
+     "target_angle_deg": 90, "inside_radius": 2, "flange_side": 1}
+  ],
+  "thickness": 2.0,
+  "material_id": "DC04",
+  "grain_direction_deg": 0,
+  "machine_id": "AMADA-HFE-1003",
+  "candidate_dies": ["V12", "V16"],
+  "candidate_punches": ["R2-GOOSE", "R3-STD"],
+  "springback_deg": 2.0
+}

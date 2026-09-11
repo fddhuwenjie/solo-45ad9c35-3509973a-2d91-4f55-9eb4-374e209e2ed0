@@ -40,10 +40,18 @@ class Punch(BaseModel):
     punch_height: float = Field(gt=0)
     punch_length: float = Field(gt=0)
     nose_width: float = Field(gt=0,
-                              description="punch body width above the nose")
+                              description="relieved nose section width, mm")
     relief_height: float = Field(
         default=0.0, ge=0,
-        description="height of the relieved (narrow) nose section")
+        description="height of the relieved (narrow) nose section, mm")
+    body_width: float = Field(
+        default=0.0, gt=0,
+        description="punch body width above the relieved nose, mm")
+    goose_neck_open_side: int = Field(
+        default=0, ge=-1, le=1,
+        description="0 = symmetric punch; +1/-1 = goose-neck whose body "
+                    "stands back on that machine-s side so a tall rising "
+                    "flange on the other side clears it")
 
 
 class PressBrake(BaseModel):

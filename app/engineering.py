@@ -26,11 +26,6 @@ def included_to_press_angle(included_deg: float,
     return 180.0 - included_deg + springback_deg
 
 
-def bend_allowance(radius: float, thickness: float, included_deg: float,
-                   k_factor: float) -> float:
-    """Neutral-axis arc length over the bend region."""
-    alpha = math.radians(180.0 - included_deg)
-    return alpha * (radius + k_factor * thickness)
 
 
 # ---------------------------------------------------------------- v / tools
@@ -43,17 +38,6 @@ def v_opening_range(thickness: float) -> Tuple[float, float, float]:
     return vmin, vpref, vmax
 
 
-def die_for_thickness(dies: List[Die], thickness: float
-                      ) -> List[Tuple[float, Die]]:
-    """Return (distance_from_preferred, die) pairs within the usable V
-    window, sorted closest to the preferred V first (stable by id)."""
-    vmin, vpref, vmax = v_opening_range(thickness)
-    cand = []
-    for d in sorted(dies, key=lambda x: x.id):
-        if vmin - 1e-6 <= d.v_width <= vmax + 1e-6:
-            cand.append((abs(d.v_width - vpref), d))
-    cand.sort(key=lambda x: (x[0], x[1].id))
-    return cand
 
 
 def min_flange_length(thickness: float, v: float) -> float:
@@ -72,11 +56,13 @@ def punch_fits(punch: Punch, die: Die, radius: float,
                thickness: float, included_deg: float,
                springback_deg: float) -> Tuple[bool, List[str]]:
     problems: List[str] = []
-    # tip radius vs inside radius (punch tip defines the inside radius)
-    if punch.tip_radius > radius + 0.5:
+    # The punch tip sets the inside radius; a tip up to one thickness larger
+    # still air-bends to the nominal part (inside radius floats up slightly),
+    # only a much larger tip cannot enter the part's inside radius.
+    if punch.tip_radius > radius + thickness + 0.5:
         problems.append(
-            f"punch tip radius {punch.tip_radius:g} > required inside "
-            f"radius {radius:g}")
+            f"punch tip radius {punch.tip_radius:g} more than one thickness "
+            f"larger than inside radius {radius:g}")
     if punch.tip_radius < max(0.0, radius - thickness):
         problems.append(
             f"punch tip radius {punch.tip_radius:g} much sharper than "
@@ -103,7 +89,6 @@ def tonnage_kn(thickness: float, length_mm: float, v_width: float,
     base = 1.42
     # empirical angle correction normalised at 90 deg
     bend = math.radians(180.0 - included_deg)
-    angle_factor = 1.0 / max(0.45, math.sin(bend)) / (1.0 / 1.0)
     angle_factor = 1.0 + max(0.0, (bend - math.pi / 2)) * 0.55
     # F [N] = Rm * t^2 * L / V * 1.42  -> kN /1000
     return tensile_mpa * thickness ** 2 * length_mm / v_width * base * \

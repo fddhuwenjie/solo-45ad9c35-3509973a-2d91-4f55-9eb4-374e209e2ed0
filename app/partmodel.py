@@ -181,46 +181,84 @@ class Part:
                             f.point3d(f.poly2d[k]), fi))
         return out
 
-    def section(self, q: G.Vec3, u: G.Vec3, samples: int = 3,
+    def axis_extent(self, q: G.Vec3, u: G.Vec3) -> Tuple[float, float]:
+        lo, hi = float("inf"), float("-inf")
+        for f in self.faces:
+            for p2 in f.poly2d:
+                d = G.vdot(G.vsub(f.point3d(p2), q), u)
+                lo, hi = min(lo, d), max(hi, d)
+        return lo, hi
+
+    def section(self, q: G.Vec3, u: G.Vec3, samples: int = 5,
                 tol: float = 1e-6
                 ) -> List[Tuple[float, float, float, float, int]]:
-        """Cut the folded part by planes perpendicular to axis (q, u).
+        """Cross section by planes perpendicular to axis (q, u).
 
-        Returns segments in the machine-view plane: first coordinate measured
-        along ``n`` (in-plane normal to the axis), second along z.  Each item
-        is (s1,z1,s2,z2,face_index); multiple cut planes are merged into one
-        polyline-free set (axisymmetric sections coincide)."""
+        Each face is cut on its *boundary edges* (a plane intersects a planar
+        polygon in a straight chord; pairing boundary hits along that chord
+        also covers non-convex faces).  Several planes along the axis are
+        sampled and coincident chords are merged, so tabs limited to part of
+        the bend length are not lost.
+
+        Returns segments (s1, z1, s2, z2, face_index) where s is measured
+        along the in-plane normal to the axis and z is world height.
+        """
+        u = G.vunit(u)
         n = G.vunit(G.vcross(u, [0.0, 0.0, 1.0]))
         if G.vnorm(n) < 1e-6:
             n = [1.0, 0.0, 0.0]
-        L = 0.0
-        for (A, B, C, _f) in self.all_triangles3d():
-            for P in (A, B, C):
-                L = max(L, abs(G.vdot(G.vsub(P, q), u)))
-        cut_positions = [L * f for f in (0.25, 0.5, 0.75)[:samples]]
-        merged: Dict[int, List[Tuple[float, float]]] = {}
+        lo, hi = self.axis_extent(q, u)
+        if hi - lo <= tol:
+            return []
+        cut_positions = [lo + (hi - lo) * (k + 1) / (samples + 1)
+                         for k in range(samples)]
+        seen: List[Tuple[float, float, float, float, int]] = []
+
+        def add_seg(s1, z1, s2, z2, fi):
+            # normalise orientation for dedup
+            if (s1, z1) > (s2, z2):
+                s1, s2 = s2, s1
+                z1, z2 = z2, z1
+            length = math.hypot(s2 - s1, z2 - z1)
+            if length <= 1e-4:
+                return
+            for (a1, b1, a2, b2, _) in seen:
+                if math.hypot(a1 - s1, b1 - z1) < 1e-3 and \
+                        math.hypot(a2 - s2, b2 - z2) < 1e-3:
+                    return
+            seen.append((s1, z1, s2, z2, fi))
+
         for lam in cut_positions:
             plane_q = G.vadd(q, [u[0] * lam, u[1] * lam, u[2] * lam])
-            for (A, B, C, fi) in self.all_triangles3d():
-                V = [A, B, C]
-                d = [G.vdot(G.vsub(v, plane_q), u) for v in V]
+            for fi, f in enumerate(self.faces):
+                n3 = len(f.poly2d)
+                pts3 = [f.point3d(p2) for p2 in f.poly2d]
+                d = [G.vdot(G.vsub(p, plane_q), u) for p in pts3]
                 hits: List[Tuple[float, float]] = []
-                for a, bb in ((0, 1), (1, 2), (2, 0)):
-                    if (d[a] > tol) != (d[bb] > tol) and \
-                            abs(d[a] - d[bb]) > tol:
-                        t = d[a] / (d[a] - d[bb])
-                        p = G.vadd(V[a], G.vmul(G.vsub(V[bb], V[a]), t))
+                for i in range(n3):
+                    j = (i + 1) % n3
+                    on_i, on_j = abs(d[i]) <= tol, abs(d[j]) <= tol
+                    if on_i:  # vertex on the plane: record once
+                        p = pts3[i]
                         w = G.vsub(p, plane_q)
                         hits.append((G.vdot(w, n), p[2]))
-                if len(hits) == 2:
-                    merged.setdefault(fi, []).extend(hits)
-        out = []
-        for fi, pts in merged.items():
-            pts.sort()
-            a, bb = pts[0], pts[-1]
-            if math.hypot(bb[0] - a[0], bb[1] - a[1]) > tol:
-                out.append((a[0], a[1], bb[0], bb[1], fi))
-        return out
+                    elif (d[i] > 0) != (d[j] > 0) and not on_j:
+                        t = d[i] / (d[i] - d[j])
+                        p = G.vadd(pts3[i],
+                                   G.vmul(G.vsub(pts3[j], pts3[i]), t))
+                        w = G.vsub(p, plane_q)
+                        hits.append((G.vdot(w, n), p[2]))
+                # chord points are collinear; sort and pair adjacent
+                hits.sort()
+                uniq: List[Tuple[float, float]] = []
+                for h in hits:
+                    if not uniq or math.hypot(h[0] - uniq[-1][0],
+                                              h[1] - uniq[-1][1]) > 1e-6:
+                        uniq.append(h)
+                for k in range(0, len(uniq) - 1, 2):
+                    add_seg(uniq[k][0], uniq[k][1],
+                            uniq[k + 1][0], uniq[k + 1][1], fi)
+        return seen
 
 
 def build_stage(contour, bends, thickness, grain_angle_deg,

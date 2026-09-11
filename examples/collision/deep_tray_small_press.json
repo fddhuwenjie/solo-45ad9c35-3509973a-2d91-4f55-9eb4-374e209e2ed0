@@ -1,0 +1,17 @@
+{
+  "name": "deep tray 440 flange on 50t press (frame/gauge clash)",
+  "contour": [[0, 0], [100, 0], [100, 500], [0, 500]],
+  "bends": [
+    {"id": "B1", "p0": [0, 30], "p1": [100, 30],
+     "target_angle_deg": 90, "inside_radius": 3, "flange_side": -1},
+    {"id": "B2", "p0": [0, 470], "p1": [100, 470],
+     "target_angle_deg": 90, "inside_radius": 3, "flange_side": 1}
+  ],
+  "thickness": 2.5,
+  "material_id": "DC04",
+  "grain_direction_deg": 0,
+  "machine_id": "SMALL-50T",
+  "candidate_dies": ["V16"],
+  "candidate_punches": ["R3-STD"],
+  "springback_deg": 2.0
+}

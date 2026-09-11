@@ -1,0 +1,19 @@
+{
+  "name": "3-step stepped profile (no feasible bend order)",
+  "contour": [[0, 0], [120, 0], [120, 300], [0, 300]],
+  "bends": [
+    {"id": "B1", "p0": [0, 60], "p1": [120, 60],
+     "target_angle_deg": 90, "inside_radius": 3, "flange_side": -1},
+    {"id": "B2", "p0": [0, 150], "p1": [120, 150],
+     "target_angle_deg": 90, "inside_radius": 3, "flange_side": 1},
+    {"id": "B3", "p0": [0, 240], "p1": [120, 240],
+     "target_angle_deg": 90, "inside_radius": 3, "flange_side": -1}
+  ],
+  "thickness": 2.5,
+  "material_id": "DC04",
+  "grain_direction_deg": 0,
+  "machine_id": "SMALL-50T",
+  "candidate_dies": ["V16"],
+  "candidate_punches": ["R3-STD"],
+  "springback_deg": 2.0
+}
