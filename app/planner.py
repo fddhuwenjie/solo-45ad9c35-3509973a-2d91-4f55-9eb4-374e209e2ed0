@@ -56,7 +56,8 @@ class PlanningContext:
                  grain_angle_deg: float, springback_deg: float,
                  material: Material, machine: PressBrake,
                  dies: List[Die], punches: List[Punch],
-                 springback_overrides: Optional[Dict[str, float]] = None):
+                 springback_overrides: Optional[Dict[str, float]] = None,
+                 layout=None):
         self.contour = contour
         self.bends = sorted(bends, key=lambda b: b.id)
         overrides = springback_overrides or {}
@@ -73,9 +74,50 @@ class PlanningContext:
         self.machine = machine
         self.dies = {d.id: d for d in dies}
         self.punches = {p.id: p for p in punches}
+        # segmented tooling solver (app.segments.LayoutSolver) or None
+        self.layout = layout
 
     def bend(self, bid: str) -> Bend:
         return next(b for b in self.bends if b.id == bid)
+
+
+def _rail_length_check(ctx: PlanningContext, b: Bend, rail: str,
+                       profile_id: str, tool_length: float) -> Check:
+    """Length feasibility of one rail (die or punch).
+
+    With a layout solver attached, the integral tool *or* a train of
+    physical segments must cover the bend line plus the end margins while
+    fitting the bed, the clamp forbidden zones and the seam keep-out
+    zones; otherwise this falls back to the plain length comparison.
+    """
+    code = f"{rail}_length"
+    label = "die" if rail == "die" else "punch"
+    if ctx.layout is None:
+        if tool_length + 1e-6 >= b.length():
+            return Check(code, True,
+                         f"{label} {tool_length:g} >= bend {b.length():.1f}",
+                         b.length(), tool_length)
+        return Check(code, False,
+                     f"{label} {tool_length:g} shorter than bend "
+                     f"{b.length():.1f}", b.length(), tool_length)
+    margin = ctx.layout.end_margin_mm
+    need = b.length() + 2.0 * margin
+    cands, fail = ctx.layout.rail_layouts(rail, profile_id, tool_length,
+                                          b.length())
+    if cands:
+        best = cands[0]
+        if best.integral:
+            return Check(code, True,
+                         f"{label} {tool_length:g} mm covers bend "
+                         f"{b.length():.1f} mm + 2x{margin:g} mm end margin",
+                         b.length(), tool_length)
+        return Check(code, True,
+                     f"{label} {profile_id} assembled from "
+                     f"{len(best.pieces)} segments covers {need:g} mm "
+                     f"(bend {b.length():.1f} + 2x{margin:g} mm end margin)",
+                     b.length(), need)
+    return Check(code, False, fail.detail,
+                 round(fail.available_mm, 3), round(need, 3))
 
 
 def _engineering_checks(ctx: PlanningContext, b: Bend, die: Die,
@@ -129,25 +171,11 @@ def _engineering_checks(ctx: PlanningContext, b: Bend, die: Die,
         checks.append(Check("die_angle", False,
                             f"die V {die.v_angle_deg:g}° wider than the "
                             f"{b.target_angle:g}° target"))
-    # tooling length along the bend
-    if die.die_length + 1e-6 >= b.length():
-        checks.append(Check("die_length", True,
-                            f"die {die.die_length:g} >= bend {b.length():.1f}",
-                            b.length(), die.die_length))
-    else:
-        checks.append(Check("die_length", False,
-                            f"die {die.die_length:g} shorter than bend "
-                            f"{b.length():.1f}", b.length(), die.die_length))
-    if punch.punch_length + 1e-6 >= b.length():
-        checks.append(Check("punch_length", True,
-                            f"punch {punch.punch_length:g} >= bend "
-                            f"{b.length():.1f}", b.length(),
-                            punch.punch_length))
-    else:
-        checks.append(Check("punch_length", False,
-                            f"punch {punch.punch_length:g} shorter than "
-                            f"bend {b.length():.1f}", b.length(),
-                            punch.punch_length))
+    # tooling length along the bend: an integral tool or a segment train
+    # must cover the bend line plus the end margins on the bed
+    checks.append(_rail_length_check(ctx, b, "die", die.id, die.die_length))
+    checks.append(_rail_length_check(ctx, b, "punch", punch.id,
+                                     punch.punch_length))
     # punch fit
     ok, problems = E.punch_fits(punch, die, b.radius, ctx.thickness,
                                 b.target_angle, b.springback_used)

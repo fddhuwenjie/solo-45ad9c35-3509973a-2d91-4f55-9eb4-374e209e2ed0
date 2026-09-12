@@ -4,10 +4,11 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
-from ..models import (BranchRequest, CardVersionOut, PartCreate,
-                      TechnicianSequence)
+from ..models import (BranchRequest, CardVersionOut, LayoutCheckRequest,
+                      PartCreate, TechnicianSequence)
 from ..runtime import get_store
-from ..service import CatalogError, load_context, solve, solve_for_card
+from ..service import (CatalogError, check_manual_layout, load_context,
+                       solve, solve_for_card)
 
 router = APIRouter(tags=["planning"])
 
@@ -34,11 +35,12 @@ def _card_out(row: dict, include_svg: bool) -> dict:
 def solve_part(part_id: int):
     store = get_store()
     try:
-        result, svgs, snapshot = solve_for_card(store, part_id)
+        result, svgs, snapshot, segment_ids = solve_for_card(store, part_id)
     except CatalogError as e:
         raise HTTPException(400, str(e))
     card_id = store.create_card(part_id, result, svgs,
-                                input_snapshot=snapshot)
+                                input_snapshot=snapshot,
+                                segment_ids=segment_ids)
     return _card_out(store.get_card(card_id), include_svg=True)
 
 
@@ -46,13 +48,28 @@ def solve_part(part_id: int):
 def check_sequence(part_id: int, body: TechnicianSequence):
     store = get_store()
     try:
-        result, svgs, snapshot = solve_for_card(
+        result, svgs, snapshot, _ = solve_for_card(
             store, part_id, forced_order=body.bend_ids)
     except CatalogError as e:
         raise HTTPException(400, str(e))
     # technician validation is not persisted as a process card
     return {"requested_order": body.bend_ids, "note": body.note,
             **result, "svg": svgs}
+
+
+@router.post("/parts/{part_id}/layout-check")
+def layout_check(part_id: int, body: LayoutCheckRequest):
+    """Validate a technician-specified segment layout (人工配段校验).
+
+    Intercepts duplicate physical occupancy, profile/kind/clamp
+    incompatibility, out-of-bed placement, forbidden zones, seam keep-out
+    violations and insufficient coverage.  Not persisted.
+    """
+    store = get_store()
+    try:
+        return check_manual_layout(store, part_id, body)
+    except CatalogError as e:
+        raise HTTPException(400, str(e))
 
 
 # ----------------------------------------------------------- cards
@@ -157,10 +174,12 @@ def branch_card(card_id: int, body: BranchRequest):
     except CatalogError as e:
         raise HTTPException(400, str(e))
     new_part_id = store.create_part(data)
-    result, svgs, new_snapshot = solve_for_card(store, new_part_id)
+    result, svgs, new_snapshot, segment_ids = solve_for_card(store,
+                                                             new_part_id)
     new_card = store.create_card(new_part_id, result, svgs,
                                  parent_card_id=card_id,
-                                 input_snapshot=new_snapshot)
+                                 input_snapshot=new_snapshot,
+                                 segment_ids=segment_ids)
     out = _card_out(store.get_card(new_card), include_svg=True)
     out["branch_note"] = body.note
     return out

@@ -8,19 +8,21 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from .routers import catalogs, correction, parts, plans
+from .routers import catalogs, correction, parts, plans, segments
 from .runtime import get_store
 
 app = FastAPI(
     title="Sheet-metal bend sequence planner",
-    version="1.1.0",
+    version="1.2.0",
     description="Progressive forming geometry, deterministic bend-order "
-                "search, machine/collision/backgauge checks, sealed process "
-                "cards and first-piece springback correction.")
+                "search, machine/collision/backgauge checks, segmented "
+                "tool layouts with tool-change optimisation, sealed "
+                "process cards and first-piece springback correction.")
 
 app.include_router(parts.router)
 app.include_router(plans.router)
 app.include_router(catalogs.router)
+app.include_router(segments.router)
 app.include_router(correction.router)
 
 

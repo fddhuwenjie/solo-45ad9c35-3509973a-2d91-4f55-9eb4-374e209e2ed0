@@ -61,6 +61,22 @@ class Store:
                   payload TEXT NOT NULL,
                   PRIMARY KEY(kind, id)
                 );
+                CREATE TABLE IF NOT EXISTS tool_segments(
+                  segment_id TEXT PRIMARY KEY,
+                  kind TEXT NOT NULL,
+                  profile_id TEXT NOT NULL,
+                  length_mm REAL NOT NULL,
+                  handedness TEXT NOT NULL DEFAULT 'any',
+                  clamp_system TEXT NOT NULL DEFAULT 'STD',
+                  retired INTEGER NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  retired_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS card_segment_usage(
+                  card_id INTEGER NOT NULL REFERENCES cards(card_id),
+                  segment_id TEXT NOT NULL,
+                  PRIMARY KEY(card_id, segment_id)
+                );
                 CREATE TABLE IF NOT EXISTS first_piece_runs(
                   run_id INTEGER PRIMARY KEY AUTOINCREMENT,
                   card_id INTEGER NOT NULL REFERENCES cards(card_id),
@@ -145,19 +161,45 @@ class Store:
                 throat_depth_mm=400, backgauge_min_mm=5,
                 backgauge_max_mm=650, backgauge_height_tolerance_mm=6,
                 frame_clearance_side_mm=400,
-                frame_clearance_height_mm=520).model_dump(),
+                frame_clearance_height_mm=520,
+                bed_width_mm=4100).model_dump(),
             ("press", "SMALL-50T"): PressBrake(
                 id="SMALL-50T", name="50 t workshop brake",
                 tonnage_kn=500, stroke_mm=120, open_height_mm=360,
                 throat_depth_mm=250, backgauge_min_mm=8,
                 backgauge_max_mm=400, backgauge_height_tolerance_mm=5,
                 frame_clearance_side_mm=250,
-                frame_clearance_height_mm=400).model_dump(),
+                frame_clearance_height_mm=400,
+                bed_width_mm=2600).model_dump(),
         }
         for (kind, cid), payload in seeds.items():
             c.execute(
                 "INSERT OR IGNORE INTO catalogs(kind,id,payload) VALUES(?,?,?)",
                 (kind, cid, json.dumps(payload)))
+        # physical segment inventory (实体模段): same-profile sections that
+        # the shop butts together when no integral tool is long enough
+        segment_seeds = [
+            ("SEG-D24-800L", "die", "V24", 800.0, "left"),
+            ("SEG-D24-800R", "die", "V24", 800.0, "right"),
+            ("SEG-D24-500A", "die", "V24", 500.0, "any"),
+            ("SEG-D24-500B", "die", "V24", 500.0, "any"),
+            ("SEG-D24-400", "die", "V24", 400.0, "any"),
+            ("SEG-D24-300", "die", "V24", 300.0, "any"),
+            ("SEG-D24-200", "die", "V24", 200.0, "any"),
+            ("SEG-P5-800L", "punch", "R5-STD", 800.0, "left"),
+            ("SEG-P5-800R", "punch", "R5-STD", 800.0, "right"),
+            ("SEG-P5-500A", "punch", "R5-STD", 500.0, "any"),
+            ("SEG-P5-500B", "punch", "R5-STD", 500.0, "any"),
+            ("SEG-P5-400", "punch", "R5-STD", 400.0, "any"),
+            ("SEG-P5-300", "punch", "R5-STD", 300.0, "any"),
+            ("SEG-P5-200", "punch", "R5-STD", 200.0, "any"),
+        ]
+        for sid, kind, profile, length, hand in segment_seeds:
+            c.execute(
+                "INSERT OR IGNORE INTO tool_segments(segment_id,kind,"
+                "profile_id,length_mm,handedness,clamp_system,retired,"
+                "created_at) VALUES(?,?,?,?,?,?,0,?)",
+                (sid, kind, profile, length, hand, "STD", now()))
 
     def catalog(self, kind: str, cid: str) -> Optional[dict]:
         with self.conn() as c:
@@ -176,6 +218,67 @@ class Store:
             c.execute("INSERT INTO catalogs(kind,id,payload) VALUES(?,?,?) "
                       "ON CONFLICT(kind,id) DO UPDATE SET payload=excluded.payload",
                       (kind, payload["id"], json.dumps(payload)))
+
+    # ------------------------------------------------------ tool segments
+
+    @staticmethod
+    def _segment_row(row) -> dict:
+        d = dict(row)
+        d["retired"] = bool(d["retired"])
+        return d
+
+    def list_segments(self, kind: Optional[str] = None,
+                      active_only: bool = False) -> List[dict]:
+        q = "SELECT * FROM tool_segments"
+        cond, args = [], []
+        if kind is not None:
+            cond.append("kind=?")
+            args.append(kind)
+        if active_only:
+            cond.append("retired=0")
+        if cond:
+            q += " WHERE " + " AND ".join(cond)
+        q += " ORDER BY kind, profile_id, segment_id"
+        with self.conn() as c:
+            rows = c.execute(q, args).fetchall()
+        return [self._segment_row(r) for r in rows]
+
+    def get_segment(self, segment_id: str) -> Optional[dict]:
+        with self.conn() as c:
+            row = c.execute("SELECT * FROM tool_segments WHERE segment_id=?",
+                            (segment_id,)).fetchone()
+        return self._segment_row(row) if row else None
+
+    def create_segment(self, seg: dict) -> None:
+        with _LOCK, self.conn() as c:
+            c.execute(
+                "INSERT INTO tool_segments(segment_id,kind,profile_id,"
+                "length_mm,handedness,clamp_system,retired,created_at) "
+                "VALUES(?,?,?,?,?,?,0,?)",
+                (seg["id"], seg["kind"], seg["profile_id"], seg["length_mm"],
+                 seg["handedness"], seg["clamp_system"], now()))
+
+    def retire_segment(self, segment_id: str) -> Optional[dict]:
+        """Retire a physical segment.  Draft cards whose frozen layout uses
+        it become invalid; sealed cards are historical and stay valid."""
+        with _LOCK, self.conn() as c:
+            row = c.execute("SELECT retired FROM tool_segments "
+                            "WHERE segment_id=?", (segment_id,)).fetchone()
+            if row is None:
+                return None
+            if row["retired"]:
+                return {"already_retired": True, "invalidated_card_ids": []}
+            c.execute("UPDATE tool_segments SET retired=1, retired_at=? "
+                      "WHERE segment_id=?", (now(), segment_id))
+            drafts = [r["card_id"] for r in c.execute(
+                "SELECT card_id FROM cards WHERE status='draft' AND "
+                "card_id IN (SELECT card_id FROM card_segment_usage "
+                "WHERE segment_id=?)", (segment_id,)).fetchall()]
+            if drafts:
+                marks = ",".join("?" * len(drafts))
+                c.execute(f"UPDATE cards SET status='invalid' "
+                          f"WHERE card_id IN ({marks})", drafts)
+            return {"already_retired": False, "invalidated_card_ids": drafts}
 
     # ----------------------------------------------------------- parts
 
@@ -208,7 +311,8 @@ class Store:
     def create_card(self, part_id: int, result: dict, svgs: List[str],
                     parent_card_id: Optional[int] = None,
                     input_snapshot: Optional[dict] = None,
-                    correction: Optional[dict] = None) -> int:
+                    correction: Optional[dict] = None,
+                    segment_ids: Optional[List[str]] = None) -> int:
         with _LOCK, self.conn() as c:
             ver = 1
             if parent_card_id is not None:
@@ -227,7 +331,12 @@ class Store:
                  json.dumps(result, ensure_ascii=False),
                  json.dumps(svgs, ensure_ascii=False),
                  json.dumps(correction or {}, ensure_ascii=False)))
-            return cur.lastrowid
+            card_id = cur.lastrowid
+            for sid in segment_ids or []:
+                c.execute(
+                    "INSERT OR IGNORE INTO card_segment_usage(card_id,"
+                    "segment_id) VALUES(?,?)", (card_id, sid))
+            return card_id
 
     def get_card(self, card_id: int) -> Optional[dict]:
         with self.conn() as c:

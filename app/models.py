@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------- catalogs
@@ -55,6 +55,18 @@ class Punch(BaseModel):
                     "flange on the other side clears it")
 
 
+class BedZone(BaseModel):
+    """Closed interval along the machine bed, mm, origin at bed centre."""
+    start_mm: float
+    end_mm: float
+
+    @model_validator(mode="after")
+    def _ordered(self):
+        if self.end_mm <= self.start_mm:
+            raise ValueError("zone end_mm must be greater than start_mm")
+        return self
+
+
 class PressBrake(BaseModel):
     id: str
     name: str = ""
@@ -75,11 +87,55 @@ class PressBrake(BaseModel):
     frame_clearance_height_mm: float = Field(
         default=400.0, gt=0,
         description="clear vertical height at the side frame")
+    bed_width_mm: float = Field(
+        default=3000.0, gt=0,
+        description="usable bed/ram length for tool layouts, mm")
+    punch_clamp_system: str = Field(
+        default="STD", min_length=1,
+        description="clamping system of the ram (upper) rail")
+    die_clamp_system: str = Field(
+        default="STD", min_length=1,
+        description="clamping system of the bed (lower) rail")
+    clamp_forbidden_zones: List[BedZone] = Field(
+        default_factory=list,
+        description="bed intervals blocked by clamps/hydraulics; no tool "
+                    "segment may overlap them")
 
 
 # ---------------------------------------------------------------- part input
 
 Point = List[float]
+
+
+class ToolSegment(BaseModel):
+    """One physical punch/die segment in the shop inventory (实体模段)."""
+    id: str = Field(min_length=1)
+    kind: Literal["die", "punch"] = Field(
+        description="which rail the segment mounts on: die (lower) or "
+                    "punch (upper)")
+    profile_id: str = Field(
+        min_length=1, description="tool profile catalog id (型面), e.g. V24 "
+                                  "for a die segment, R5-STD for a punch")
+    length_mm: float = Field(gt=0)
+    handedness: Literal["left", "right", "any"] = Field(
+        default="any",
+        description="machined end direction: 'left' segments must sit at "
+                    "the left end of an assembly, 'right' at the right end, "
+                    "'any' anywhere")
+    clamp_system: str = Field(
+        default="STD", min_length=1,
+        description="clamping system the segment is compatible with; must "
+                    "match the machine rail")
+
+
+class LayoutSpec(BaseModel):
+    """Per-part segmented tooling layout requirements."""
+    end_margin_mm: float = Field(
+        default=10.0, ge=0, le=500,
+        description="tool coverage required beyond each bend line end, mm")
+    seam_keepout_zones: List[BedZone] = Field(
+        default_factory=list,
+        description="bed intervals where no segment seam (joint) may fall")
 
 
 class BendLine(BaseModel):
@@ -119,6 +175,10 @@ class PartCreate(BaseModel):
         default=None,
         description="per-bend overbend allowance, deg (first-piece "
                     "correction); falls back to springback_deg when absent")
+    layout: Optional[LayoutSpec] = Field(
+        default=None,
+        description="segmented tooling layout requirements (end margin, "
+                    "seam keep-out zones); defaults apply when omitted")
 
     @field_validator("springback_overrides")
     @classmethod
@@ -145,6 +205,28 @@ class PartCreate(BaseModel):
 
 class TechnicianSequence(BaseModel):
     bend_ids: List[str]
+    note: Optional[str] = None
+
+
+# ------------------------------------------------------- manual tool layout
+
+class ManualPiece(BaseModel):
+    segment_id: str = Field(min_length=1)
+    x0_mm: float = Field(description="left end of the segment on the bed, "
+                                     "mm, origin at bed centre")
+
+
+class ManualRailLayout(BaseModel):
+    bend_id: str = Field(min_length=1)
+    die_profile: str = Field(min_length=1)
+    punch_profile: str = Field(min_length=1)
+    die_pieces: List[ManualPiece] = Field(default_factory=list)
+    punch_pieces: List[ManualPiece] = Field(default_factory=list)
+
+
+class LayoutCheckRequest(BaseModel):
+    """Technician-specified segment layout to validate (人工配段校验)."""
+    layouts: List[ManualRailLayout] = Field(min_length=1)
     note: Optional[str] = None
 
 
@@ -253,6 +335,12 @@ class StepReport(BaseModel):
     fold_angle_deg: float
     checks: List["CheckResult"]
     section_svg: Optional[str] = None
+    layout: Optional[dict] = Field(
+        default=None,
+        description="segment/integral tool layout on the bed for this step: "
+                    "per-rail pieces with bed coordinates, seams, coverage "
+                    "margins and the tool-change actions from the previous "
+                    "step")
 
 
 class CheckResult(BaseModel):
@@ -277,6 +365,11 @@ class PlanResult(BaseModel):
     steps: List[StepReport]
     failure: Optional[FailureReport] = None
     geometry_version: int = 1
+    tool_change_summary: Optional[dict] = Field(
+        default=None,
+        description="tool-change quantities across the sequence: mounts, "
+                    "removals, shifts, kept pieces and the physical "
+                    "segments used")
 
 
 class PartOut(BaseModel):

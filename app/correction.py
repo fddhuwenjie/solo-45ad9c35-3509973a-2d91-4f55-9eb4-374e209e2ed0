@@ -384,6 +384,7 @@ def _build_report(store, card: dict, part_input: PartCreate,
         derived_input, derived = _derive_input(part_input, card, overrides)
         res = solve(store, derived_input, forced_order=order)
         svgs = res.pop("_svgs")
+        segment_ids = res.pop("_segment_ids")
         replan_ok = bool(res["feasible"])
         if replan_ok:
             tool_drift = _tooling_drift(card, res)
@@ -408,7 +409,7 @@ def _build_report(store, card: dict, part_input: PartCreate,
             draft_card_id = store.create_card(
                 new_part_id, res, svgs, parent_card_id=card["card_id"],
                 input_snapshot=derived_input.model_dump(),
-                correction=correction_meta)
+                correction=correction_meta, segment_ids=segment_ids)
 
     decision = "draft_created" if draft_card_id is not None \
         else "suggestion_only"
