@@ -49,13 +49,20 @@ def load_context(store, data: PartCreate) -> Tuple[
     ids = [b.id for b in bends]
     if len(set(ids)) != len(ids):
         raise CatalogError("bend ids must be unique")
+    overrides = data.springback_overrides or {}
+    unknown = set(overrides) - set(ids)
+    if unknown:
+        raise CatalogError(
+            f"springback overrides reference unknown bends: "
+            f"{sorted(unknown)}")
 
     ctx = PlanningContext(
         contour=[tuple(p) for p in data.contour], bends=bends,
         thickness=data.thickness,
         grain_angle_deg=data.grain_direction_deg,
         springback_deg=data.springback_deg, material=material,
-        machine=machine, dies=dies, punches=punches)
+        machine=machine, dies=dies, punches=punches,
+        springback_overrides=overrides)
     return ctx, material, machine, dies, punches
 
 
@@ -90,6 +97,7 @@ def solve(store, data: PartCreate,
             "flip": sp.flip,
             "die_id": sp.die_id,
             "punch_id": sp.punch_id,
+            "springback_used_deg": round(b.springback_used, 3),
             "backgauge_distance_mm": round(sp.backgauge_distance_mm, 3),
             "backgauge_contact": sp.backgauge_contact,
             "tonnage_kn": sp.tonnage_kn,

@@ -1,7 +1,8 @@
 """Pydantic request/response models for the bend planning API."""
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from datetime import datetime
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -114,6 +115,20 @@ class PartCreate(BaseModel):
     springback_deg: float = Field(
         default=2.0, ge=0,
         description="extra overbend applied uniformly (air bending)")
+    springback_overrides: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="per-bend overbend allowance, deg (first-piece "
+                    "correction); falls back to springback_deg when absent")
+
+    @field_validator("springback_overrides")
+    @classmethod
+    def _overrides_nonneg(cls, v):
+        if v is not None:
+            for bid, val in v.items():
+                if val < 0:
+                    raise ValueError(
+                        f"springback override for bend {bid} must be >= 0")
+        return v
 
     @field_validator("contour")
     @classmethod
@@ -144,6 +159,76 @@ class BranchRequest(BaseModel):
     candidate_punches: Optional[List[str]] = None
 
 
+# ------------------------------------------------------- first-piece springback
+
+class Instrument(BaseModel):
+    id: Optional[str] = Field(default=None, description="gauge serial no.")
+    type: Optional[str] = Field(default=None,
+                               description="e.g. protractor, bevel gauge, CMM")
+    resolution_deg: Optional[float] = Field(default=None, gt=0)
+
+
+class FirstPieceMeasurement(BaseModel):
+    step_no: int = Field(gt=0, description="step in the sealed card")
+    bend_id: str
+    die_id: str = Field(description="must match the die used on that step")
+    punch_id: str = Field(description="must match the punch used on that step")
+    flip: bool = Field(description="must match the bend direction/orientation "
+                                   "recorded on that step")
+    measured_included_angle_deg: float = Field(
+        gt=0, lt=180,
+        description="measured angle between the flanges after unloading")
+
+    @field_validator("bend_id")
+    @classmethod
+    def _bend_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("bend id must not be blank")
+        return v
+
+
+class FirstPieceRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1)
+    measurements: List[FirstPieceMeasurement] = Field(min_length=1)
+    measured_at: Optional[datetime] = Field(
+        default=None,
+        description="measurement time; server UTC now when omitted")
+    instrument: Optional[Instrument] = None
+    material_lot: str = Field(min_length=1)
+    measured_thickness_mm: float = Field(gt=0)
+    note: str = ""
+    thresholds: Optional["CorrectionThresholds"] = Field(
+        default=None,
+        description="override the configurable acceptance thresholds for "
+                    "this correction run only")
+
+
+class CorrectionThresholds(BaseModel):
+    min_samples: int = Field(default=3, ge=1)
+    thickness_band: float = Field(
+        default=0.15, gt=0, le=1,
+        description="comparable sample thickness within +/- this fraction")
+    thickness_incompatible: float = Field(
+        default=0.20, gt=0, le=1,
+        description="measured thickness beyond +/- this fraction of the "
+                    "nominal thickness is an incompatible working condition")
+    target_angle_tol_deg: float = Field(default=5.0, gt=0)
+    max_robust_sigma_deg: float = Field(
+        default=1.5, gt=0,
+        description="maximum dispersion (robust sigma of observed "
+                    "springback) for an automatic draft")
+    max_compensation_deg: float = Field(
+        default=6.0, gt=0,
+        description="maximum |per-bend compensation| allowed for an "
+                    "automatic draft")
+    mad_k: float = Field(
+        default=1.4826, gt=0,
+        description="MAD -> robust sigma consistency factor for normal data")
+
+
+FirstPieceRequest.model_rebuild()
+
+
 # ---------------------------------------------------------------- output DTO
 
 class GaugeContact(BaseModel):
@@ -160,6 +245,7 @@ class StepReport(BaseModel):
     flip: bool
     die_id: str
     punch_id: str
+    springback_used_deg: float = 0.0
     backgauge_distance_mm: float
     backgauge_contact: GaugeContact
     tonnage_kn: float

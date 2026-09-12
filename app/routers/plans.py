@@ -23,6 +23,7 @@ def _card_out(row: dict, include_svg: bool) -> dict:
         "sealed_at": row["sealed_at"],
         "result": row["result"],
         "input_snapshot": row["input_snapshot"],
+        "correction": row.get("correction", {}),
         **({"svg": row["svg"]} if include_svg else {}),
     }
 

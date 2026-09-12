@@ -55,15 +55,20 @@ class PlanningContext:
     def __init__(self, contour, bends: Sequence[Bend], thickness: float,
                  grain_angle_deg: float, springback_deg: float,
                  material: Material, machine: PressBrake,
-                 dies: List[Die], punches: List[Punch]):
+                 dies: List[Die], punches: List[Punch],
+                 springback_overrides: Optional[Dict[str, float]] = None):
         self.contour = contour
         self.bends = sorted(bends, key=lambda b: b.id)
+        overrides = springback_overrides or {}
         for b in self.bends:
-            b.fold_angle = E.included_to_press_angle(b.target_angle,
-                                                     springback_deg)
+            b.springback_used = float(
+                overrides.get(b.id, springback_deg))
+            b.fold_angle = E.included_to_press_angle(
+                b.target_angle, b.springback_used)
         self.thickness = thickness
         self.grain = grain_angle_deg
         self.springback = springback_deg
+        self.springback_overrides = dict(overrides)
         self.material = material
         self.machine = machine
         self.dies = {d.id: d for d in dies}
@@ -145,7 +150,7 @@ def _engineering_checks(ctx: PlanningContext, b: Bend, die: Die,
                             punch.punch_length))
     # punch fit
     ok, problems = E.punch_fits(punch, die, b.radius, ctx.thickness,
-                                b.target_angle, ctx.springback)
+                                b.target_angle, b.springback_used)
     checks.append(Check("punch_fit", ok,
                         "; ".join(problems) if problems else
                         f"punch {punch.id} fits V {die.id} and R{b.radius:g}"))
@@ -163,7 +168,7 @@ def _engineering_checks(ctx: PlanningContext, b: Bend, die: Die,
                             f, ctx.machine.tonnage_kn))
     # stroke and daylight
     stroke = E.required_stroke(ctx.thickness, die.v_width,
-                               b.target_angle, ctx.springback)
+                               b.target_angle, b.springback_used)
     if stroke <= ctx.machine.stroke_mm + 1e-6:
         checks.append(Check("stroke", True,
                             f"stroke {stroke:.1f} <= "

@@ -28,6 +28,7 @@ class Bend:
     radius: float                # inside bend radius, mm
     flange_side: int             # +1: cross>0 side rises; -1: cross<0 rises
     fold_angle: float = 0.0      # press angle incl. overbend, deg
+    springback_used: float = 0.0  # overbend allowance applied, deg
     axis_angle_to_grain: float = 0.0
 
     def length(self) -> float:

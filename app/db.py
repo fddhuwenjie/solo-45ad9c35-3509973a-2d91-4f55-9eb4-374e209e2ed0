@@ -61,8 +61,48 @@ class Store:
                   payload TEXT NOT NULL,
                   PRIMARY KEY(kind, id)
                 );
+                CREATE TABLE IF NOT EXISTS first_piece_runs(
+                  run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  card_id INTEGER NOT NULL REFERENCES cards(card_id),
+                  idempotency_key TEXT NOT NULL UNIQUE,
+                  material_lot TEXT NOT NULL,
+                  measured_thickness_mm REAL NOT NULL,
+                  measured_at TEXT NOT NULL,
+                  instrument_json TEXT NOT NULL DEFAULT '{}',
+                  note TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  report_json TEXT NOT NULL DEFAULT '{}',
+                  draft_card_id INTEGER REFERENCES cards(card_id)
+                );
+                CREATE TABLE IF NOT EXISTS first_piece_measurements(
+                  measurement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  run_id INTEGER NOT NULL
+                    REFERENCES first_piece_runs(run_id),
+                  step_no INTEGER NOT NULL,
+                  bend_id TEXT NOT NULL,
+                  die_id TEXT NOT NULL,
+                  punch_id TEXT NOT NULL,
+                  flip INTEGER NOT NULL,
+                  planned_overbend_deg REAL NOT NULL,
+                  measured_included_angle_deg REAL NOT NULL,
+                  target_included_angle_deg REAL NOT NULL,
+                  observed_springback_deg REAL NOT NULL,
+                  nominal_thickness_mm REAL NOT NULL,
+                  material_id TEXT NOT NULL,
+                  grain_relation TEXT NOT NULL,
+                  UNIQUE(run_id, step_no),
+                  UNIQUE(run_id, bend_id)
+                );
                 """)
+            self._migrate(c)
             self._seed(c)
+
+    def _migrate(self, c):
+        cols = {r["name"] for r in c.execute(
+            "PRAGMA table_info(cards)").fetchall()}
+        if "correction_json" not in cols:
+            c.execute("ALTER TABLE cards ADD COLUMN correction_json "
+                      "TEXT NOT NULL DEFAULT '{}'")
 
     # ----------------------------------------------------------- catalog
 
@@ -167,7 +207,8 @@ class Store:
 
     def create_card(self, part_id: int, result: dict, svgs: List[str],
                     parent_card_id: Optional[int] = None,
-                    input_snapshot: Optional[dict] = None) -> int:
+                    input_snapshot: Optional[dict] = None,
+                    correction: Optional[dict] = None) -> int:
         with _LOCK, self.conn() as c:
             ver = 1
             if parent_card_id is not None:
@@ -178,12 +219,14 @@ class Store:
                 ver = int(prow["version"]) + 1
             cur = c.execute(
                 "INSERT INTO cards(part_id,parent_card_id,version,status,"
-                "created_at,input_snapshot,result_json,svg_json) "
-                "VALUES(?,?,?,?,?,?,?,?)",
+                "created_at,input_snapshot,result_json,svg_json,"
+                "correction_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
                 (part_id, parent_card_id, ver, "draft", now(),
                  json.dumps(input_snapshot or {}, ensure_ascii=False),
                  json.dumps(result, ensure_ascii=False),
-                 json.dumps(svgs, ensure_ascii=False)))
+                 json.dumps(svgs, ensure_ascii=False),
+                 json.dumps(correction or {}, ensure_ascii=False)))
             return cur.lastrowid
 
     def get_card(self, card_id: int) -> Optional[dict]:
@@ -196,6 +239,7 @@ class Store:
         d["result"] = json.loads(d.pop("result_json"))
         d["svg"] = json.loads(d.pop("svg_json"))
         d["input_snapshot"] = json.loads(d["input_snapshot"])
+        d["correction"] = json.loads(d["correction_json"])
         return d
 
     def list_cards(self, part_id: Optional[int] = None) -> List[dict]:
@@ -229,8 +273,102 @@ class Store:
             d = self.get_card(cur)
             if d is None:
                 break
-            out.append({k: d[k] for k in (
+            node = {k: d[k] for k in (
                 "card_id", "part_id", "parent_card_id", "version", "status",
-                "created_at", "sealed_at")})
+                "created_at", "sealed_at")}
+            corr = d.get("correction") or {}
+            if corr:
+                node["correction_kind"] = corr.get("kind")
+                node["first_piece_run_id"] = corr.get("first_piece_run_id")
+            out.append(node)
             cur = d["parent_card_id"]
         return out
+
+    # ----------------------------------------------------- first-piece runs
+
+    def create_first_piece_run(self, card_id: int, key: str,
+                               material_lot: str,
+                               measured_thickness_mm: float,
+                               measured_at: str, instrument: dict,
+                               note: str) -> int:
+        with _LOCK, self.conn() as c:
+            cur = c.execute(
+                "INSERT INTO first_piece_runs(card_id,idempotency_key,"
+                "material_lot,measured_thickness_mm,measured_at,"
+                "instrument_json,note,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (card_id, key, material_lot, measured_thickness_mm,
+                 measured_at, json.dumps(instrument, ensure_ascii=False),
+                 note, now()))
+            return cur.lastrowid
+
+    def get_run_by_key(self, key: str) -> Optional[dict]:
+        with self.conn() as c:
+            row = c.execute("SELECT * FROM first_piece_runs "
+                            "WHERE idempotency_key=?", (key,)).fetchone()
+        return dict(row) if row else None
+
+    def get_run(self, run_id: int) -> Optional[dict]:
+        with self.conn() as c:
+            row = c.execute("SELECT * FROM first_piece_runs WHERE run_id=?",
+                            (run_id,)).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            d["instrument"] = json.loads(d.pop("instrument_json"))
+            d["report"] = json.loads(d.pop("report_json"))
+            meas = c.execute(
+                "SELECT * FROM first_piece_measurements WHERE run_id=? "
+                "ORDER BY step_no", (run_id,)).fetchall()
+            d["measurements"] = [dict(m) for m in meas]
+        return d
+
+    def add_measurement(self, run_id: int, m: dict) -> None:
+        with _LOCK, self.conn() as c:
+            c.execute(
+                "INSERT INTO first_piece_measurements(run_id,step_no,"
+                "bend_id,die_id,punch_id,flip,planned_overbend_deg,"
+                "measured_included_angle_deg,target_included_angle_deg,"
+                "observed_springback_deg,nominal_thickness_mm,"
+                "material_id,grain_relation) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, m["step_no"], m["bend_id"], m["die_id"],
+                 m["punch_id"], 1 if m["flip"] else 0,
+                 m["planned_overbend_deg"],
+                 m["measured_included_angle_deg"],
+                 m["target_included_angle_deg"],
+                 m["observed_springback_deg"],
+                 m["nominal_thickness_mm"], m["material_id"],
+                 m["grain_relation"]))
+
+    def list_runs(self, card_id: Optional[int] = None) -> List[dict]:
+        q = ("SELECT run_id,card_id,idempotency_key,material_lot,"
+             "measured_thickness_mm,measured_at,note,created_at,"
+             "draft_card_id FROM first_piece_runs")
+        args: tuple = ()
+        if card_id is not None:
+            q += " WHERE card_id=?"
+            args = (card_id,)
+        q += " ORDER BY run_id"
+        with self.conn() as c:
+            return [dict(r) for r in c.execute(q, args).fetchall()]
+
+    def all_measurements(self) -> List[dict]:
+        """Flat measurement rows joined with run context (sample pool)."""
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT m.*, r.card_id, r.run_id, r.material_lot,"
+                "r.measured_thickness_mm, r.measured_at "
+                "FROM first_piece_measurements m "
+                "JOIN first_piece_runs r ON r.run_id = m.run_id "
+                "ORDER BY m.measurement_id").fetchall()
+        return [dict(r) for r in rows]
+
+    def finish_first_piece_run(self, run_id: int, report: dict,
+                               draft_card_id: Optional[int]) -> None:
+        with _LOCK, self.conn() as c:
+            c.execute(
+                "UPDATE first_piece_runs SET report_json=?, "
+                "draft_card_id=? WHERE run_id=?",
+                (json.dumps(report, ensure_ascii=False), draft_card_id,
+                 run_id))

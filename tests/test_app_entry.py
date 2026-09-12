@@ -33,6 +33,9 @@ def test_health_and_catalog_routes(client):
         "/cards/{card_id}/branch",
         "/cards/{card_id}/lineage",
         "/cards/{card_id}/svg",
+        "/cards/{card_id}/first-piece",
+        "/first-piece",
+        "/first-piece/{run_id}",
     ):
         assert expected in paths, expected
 
